@@ -63,3 +63,20 @@ Standard chats have amnesia. Truth-Ctx provides a "bridge" so your AI remembers 
 ```bash
 # Install via the Rust toolchain
 cargo install truth-ctx
+
+```
+### **1. Ininitialization**
+```
+# Inject shell hooks & register MCP servers automatically
+truth-ctx setup
+```
+
+⌨️### Command Suite
+truth-ctx setup	
+Automates hook injection for Zsh/PowerShell and Claude MCP[cite: 1].
+
+truth-ctx project <name>	
+Hot-swaps the Sentinel's Truth to a specific project (Stride, Ledgr, etc.)[cite: 1].
+
+truth-ctx doctor	
+Audits your hooks and config files for health[cite: 1]
