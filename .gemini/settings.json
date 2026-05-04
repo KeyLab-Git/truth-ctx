@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "truth-ctx": {
+      "command": "D:\\jp\\Projects\\truth-ctx\\target\\debug\\truth-ctx.exe",
+      "args": [
+        "mcp"
+      ]
+    }
+  }
+}

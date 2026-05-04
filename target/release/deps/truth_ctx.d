@@ -1,0 +1,12 @@
+D:\jp\Projects\truth-ctx\target\release\deps\truth_ctx.d: src\main.rs src\kernel\mod.rs src\kernel\memory.rs src\kernel\scheduler.rs src\monitor\mod.rs src\mcp\mod.rs
+
+D:\jp\Projects\truth-ctx\target\release\deps\truth_ctx.exe: src\main.rs src\kernel\mod.rs src\kernel\memory.rs src\kernel\scheduler.rs src\monitor\mod.rs src\mcp\mod.rs
+
+src\main.rs:
+src\kernel\mod.rs:
+src\kernel\memory.rs:
+src\kernel\scheduler.rs:
+src\monitor\mod.rs:
+src\mcp\mod.rs:
+
+# env-dep:CARGO_PKG_VERSION=0.1.0

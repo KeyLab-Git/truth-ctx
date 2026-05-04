@@ -1,0 +1,18 @@
+[package]
+name = "truth-ctx"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+# Enable the Semantic Vector Sentinel (downloads ~30MB model on first run)
+semantic = ["dep:fastembed"]
+
+[dependencies]
+tokio = { version = "1.35", features = ["full"] }
+notify = "6.1.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+clap = { version = "4.4", features = ["derive"] }
+chrono = "0.4"
+walkdir = "2.4"
+fastembed = { version = "3", optional = true }
