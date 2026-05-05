@@ -88,6 +88,21 @@ pub fn run() {
                                 "properties": {},
                                 "additionalProperties": false
                             }
+                        },
+                        {
+                            "name": "truth_audit",
+                            "description": "Post-generation hallucination check. Pass the AI response text; returns a warning if it diverges from the user's original intent (cosine similarity < 0.85). Requires the semantic feature to be enabled.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "response": {
+                                        "type": "string",
+                                        "description": "The AI-generated response text to audit"
+                                    }
+                                },
+                                "required": ["response"],
+                                "additionalProperties": false
+                            }
                         }
                     ]
                 }
@@ -137,6 +152,19 @@ pub fn run() {
                             "jsonrpc": "2.0",
                             "id": id,
                             "result": { "content": [{ "type": "text", "text": "Truth state cleared." }] }
+                        })
+                    }
+
+                    "truth_audit" => {
+                        let response = args["response"].as_str().unwrap_or("");
+                        let text = match os.audit_response(response) {
+                            Some(warning) => warning,
+                            None => "✓ Response aligns with original intent.".to_string(),
+                        };
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": { "content": [{ "type": "text", "text": text }] }
                         })
                     }
 

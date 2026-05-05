@@ -3,6 +3,10 @@ name = "truth-ctx"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "truth"
+path = "src/main.rs"
+
 [features]
 # Enable the Semantic Vector Sentinel (downloads ~30MB model on first run)
 semantic = ["dep:fastembed"]

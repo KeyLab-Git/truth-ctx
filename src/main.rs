@@ -19,7 +19,7 @@ const BOLD: &str = "\x1b[1m";
 const RESET: &str = "\x1b[0m";
 
 #[derive(Parser)]
-#[command(name = "truth", about = "Truth-Ctx — Context OS for AI agents")]
+#[command(name = "truth", version, about = "Truth-Ctx — Context OS for AI agents")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -51,6 +51,14 @@ enum Commands {
     },
     /// Auto-detect AI agents and inject shell hooks + MCP registration
     Setup,
+    /// Write agent instructions so the AI always calls truth_check first
+    Init {
+        /// Agent to configure: claude, cursor, gemini, vscode, windsurf
+        #[arg(long)]
+        agent: String,
+    },
+    /// Verify truth-ctx is fully wired (PATH, hooks, MCP, agent instructions)
+    Doctor,
 }
 
 fn gemini_history_path() -> PathBuf {
@@ -85,10 +93,6 @@ async fn main() {
 
     match cli.command {
         Commands::Audit { agent, args } => {
-            eprint!("{CYAN}{BOLD}Calling truth-ctx...{RESET} ");
-
-            let mut os = kernel::memory::ContextOS::new();
-
             let flags: Vec<&str> = args.iter()
                 .filter(|a| a.starts_with('-'))
                 .map(|s| s.as_str())
@@ -99,21 +103,8 @@ async fn main() {
                 .collect();
             let raw_prompt = prompt_parts.join(" ");
 
-            let pivot_msg = os.detect_pivot(&raw_prompt);
-            if let Some(ref msg) = pivot_msg {
-                eprintln!("\n{YELLOW}⚠  {}{RESET}", msg);
-            } else {
-                eprintln!("context OK");
-            }
-
-            os.save();
-            let mut final_prompt = os.inject_truth_anchor(&raw_prompt);
-
-            let mut attempts = 0;
-            const MAX_ATTEMPTS: u32 = 3;
-
-            loop {
-                attempts += 1;
+            if raw_prompt.is_empty() {
+                // Interactive mode: pass straight through with inherited stdio
                 #[cfg(target_os = "windows")]
                 let mut cmd = {
                     let mut c = Command::new("cmd");
@@ -122,70 +113,110 @@ async fn main() {
                 };
                 #[cfg(not(target_os = "windows"))]
                 let mut cmd = Command::new(&agent);
-
+                if agent == "gemini" {
+                    cmd.env("GEMINI_CLI_TRUST_WORKSPACE", "true");
+                }
                 cmd.args(&flags);
-                if !final_prompt.is_empty() {
-                    cmd.arg(&final_prompt);
+                match cmd.spawn() {
+                    Ok(mut child) => { let _ = child.wait(); }
+                    Err(e) => {
+                        eprintln!("{RED}[Truth-Ctx] Failed to launch '{}': {}{RESET}", agent, e);
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                // Non-interactive: inject truth anchor and audit output
+                eprint!("{CYAN}{BOLD}Calling truth-ctx...{RESET} ");
+                let mut os = kernel::memory::ContextOS::new();
+
+                let pivot_msg = os.detect_pivot(&raw_prompt);
+                if let Some(ref msg) = pivot_msg {
+                    eprintln!("\n{YELLOW}⚠  {}{RESET}", msg);
+                } else {
+                    eprintln!("context OK");
                 }
 
-                // Intercept output for audit
-                cmd.stdout(Stdio::piped());
-                cmd.stderr(Stdio::inherit());
+                os.save();
+                let mut final_prompt = os.inject_truth_anchor(&raw_prompt);
 
-                match cmd.spawn() {
-                    Ok(mut child) => {
-                        let mut output = String::new();
-                        if let Some(mut stdout) = child.stdout.take() {
-                            let _ = stdout.read_to_string(&mut output);
-                        }
+                let mut attempts = 0;
+                const MAX_ATTEMPTS: u32 = 3;
 
-                        let _ = child.wait();
+                loop {
+                    attempts += 1;
+                    #[cfg(target_os = "windows")]
+                    let mut cmd = {
+                        let mut c = Command::new("cmd");
+                        c.args(["/c", agent.as_str()]);
+                        c
+                    };
+                    #[cfg(not(target_os = "windows"))]
+                    let mut cmd = Command::new(&agent);
 
-                        // ── Post-Generation Audit ────────────────────────────
-                        if os.state.latest_intent_vec.is_empty() {
-                            print!("{}", output);
-                            let _ = io::stdout().flush();
-                            break;
-                        }
+                    if agent == "gemini" {
+                        cmd.env("GEMINI_CLI_TRUST_WORKSPACE", "true");
+                    }
+                    cmd.args(&flags);
+                    cmd.arg(&final_prompt);
 
-                        if let Some(output_vec) = kernel::sentinel::try_embed(&output) {
-                            let sim = kernel::sentinel::cosine_similarity(
-                                &os.state.latest_intent_vec,
-                                &output_vec
-                            );
+                    cmd.stdout(Stdio::piped());
+                    cmd.stderr(Stdio::inherit());
 
-                            if sim >= kernel::sentinel::AUDIT_THRESHOLD {
-                                print!("{}", output);
-                                let _ = io::stdout().flush();
-                                break;
-                            } else if attempts < MAX_ATTEMPTS {
-                                eprintln!(
-                                    "\n{RED}✘ Instruction Drift detected (similarity: {:.2}){RESET}",
-                                    sim
-                                );
-                                eprintln!("{DIM}  Triggering automatic correction... (Attempt {}/{}){RESET}", attempts, MAX_ATTEMPTS);
-                                
-                                final_prompt = format!(
-                                    "{}\n\n[CRITICAL CORRECTION]\nYour previous output drifted from my intent: \"{}\".\nRefactor your response to strictly adhere to this instruction. Do not ignore the context anchor provided earlier.",
-                                    raw_prompt,
-                                    os.state.latest_intent_text
-                                );
-                                continue;
-                            } else {
-                                eprintln!("{YELLOW}⚠ Maximum correction attempts reached. Outputting best effort.{RESET}");
+                    match cmd.spawn() {
+                        Ok(mut child) => {
+                            let mut output = String::new();
+                            if let Some(mut stdout) = child.stdout.take() {
+                                let _ = stdout.read_to_string(&mut output);
+                            }
+
+                            let _ = child.wait();
+
+                            // ── Post-Generation Audit ────────────────────────────
+                            if os.state.latest_intent_vec.is_empty() {
                                 print!("{}", output);
                                 let _ = io::stdout().flush();
                                 break;
                             }
-                        } else {
-                            print!("{}", output);
-                            let _ = io::stdout().flush();
-                            break;
+
+                            if let Some(output_vec) = kernel::sentinel::try_embed(&output) {
+                                let sim = kernel::sentinel::cosine_similarity(
+                                    &os.state.latest_intent_vec,
+                                    &output_vec
+                                );
+
+                                if sim >= kernel::sentinel::AUDIT_THRESHOLD {
+                                    print!("{}", output);
+                                    let _ = io::stdout().flush();
+                                    break;
+                                } else if attempts < MAX_ATTEMPTS {
+                                    eprintln!(
+                                        "\n{RED}✘ Instruction Drift detected (similarity: {:.2}){RESET}",
+                                        sim
+                                    );
+                                    eprintln!("{DIM}  Triggering automatic correction... (Attempt {}/{}){RESET}", attempts, MAX_ATTEMPTS);
+
+                                    final_prompt = format!(
+                                        "{}\n\n[CRITICAL CORRECTION]\nYour previous output drifted from my intent: \"{}\".\nRefactor your response to strictly adhere to this instruction. Do not ignore the context anchor provided earlier.",
+                                        raw_prompt,
+                                        os.state.latest_intent_text
+                                    );
+                                    continue;
+                                } else {
+                                    eprintln!("{YELLOW}⚠ Maximum correction attempts reached. Outputting best effort.{RESET}");
+                                    print!("{}", output);
+                                    let _ = io::stdout().flush();
+                                    break;
+                                }
+                            } else {
+                                print!("{}", output);
+                                let _ = io::stdout().flush();
+                                break;
+                            }
                         }
-                    }
-                    Err(e) => {
-                        eprintln!("{RED}[Truth-Ctx] Failed to launch '{}': {}{RESET}", agent, e);
-                        std::process::exit(1);
+                        Err(e) => {
+                            eprintln!("{RED}[Truth-Ctx] Failed to launch '{}': {}{RESET}", agent, e);
+                            std::process::exit(1);
+                        }
                     }
                 }
             }
@@ -235,6 +266,17 @@ async fn main() {
         Commands::Setup => {
             print_setup_results(setup::run_setup());
         }
+
+        Commands::Init { agent } => {
+            match setup::init_agent(&agent) {
+                Ok(path) => println!("{GREEN}✓{RESET} Agent instructions written to {DIM}{}{RESET}", path),
+                Err(e)   => eprintln!("{RED}✗ init failed: {}{RESET}", e),
+            }
+        }
+
+        Commands::Doctor => {
+            print_doctor(setup::run_doctor());
+        }
     }
 }
 
@@ -272,6 +314,16 @@ function claude() {{
 #   source ~/.zshrc     # Zsh
 #
 # Then just use `gemini` or `claude` normally. Truth-Ctx intercepts every call.
+
+# ── Setup & Uninstall ───────────────────────────────────────────────────────
+# Auto-detect agents and inject hooks + MCP registration:
+#   truth setup
+#
+# Remove truth-ctx state:
+#   truth uninstall
+#
+# Remove truth-ctx state AND binary:
+#   truth uninstall --bin
 "#
     );
 }
@@ -316,15 +368,26 @@ fn uninstall(remove_bin: bool) {
 
     println!();
     println!("{CYAN}{BOLD}Shell hook cleanup{RESET}");
-    println!("{DIM}  Remove these lines from your shell profile ($PROFILE / ~/.zshrc / ~/.bashrc):{RESET}");
+    print_results(setup::remove_shell_hooks());
+
     println!();
-    println!("  # PowerShell");
-    println!("  function gemini {{ truth audit gemini @args }}");
-    println!("  function claude  {{ truth audit claude  @args }}");
+    println!("{CYAN}{BOLD}MCP registration cleanup{RESET}");
+    print_results(setup::remove_mcp_registrations());
+
     println!();
-    println!("  # Zsh / Bash");
-    println!("  function gemini() {{ truth audit gemini \"$@\" }}");
-    println!("  function claude()  {{ truth audit claude  \"$@\" }}");
+    println!("{DIM}  Reload your shell to apply: . $PROFILE  /  source ~/.zshrc{RESET}");
+}
+
+fn print_results(results: Vec<setup::SetupResult>) {
+    for r in results {
+        let (icon, color) = match r.status {
+            setup::SetupStatus::Done     => ("\u{2713}", GREEN),
+            setup::SetupStatus::Skipped  => ("\u{25cb}", DIM),
+            setup::SetupStatus::Failed   => ("\u{2717}", RED),
+            setup::SetupStatus::NotFound => ("\u{2013}", DIM),
+        };
+        println!("  {color}{icon}{RESET} {:<16} {DIM}{}{RESET}", r.agent, r.detail);
+    }
 }
 
 fn print_setup_results(results: Vec<setup::SetupResult>) {
@@ -374,9 +437,50 @@ fn print_setup_results(results: Vec<setup::SetupResult>) {
     );
     println!();
 
-    if done > 0 {
-        println!("{CYAN}Reload your shell profile for hook changes to take effect:{RESET}");
-        println!("{DIM}  PowerShell:  . $PROFILE{RESET}");
-        println!("{DIM}  Zsh/Bash:    source ~/.zshrc{RESET}");
+    println!();
+    println!("{CYAN}{BOLD}Next steps{RESET}");
+    println!("{DIM}  1. Restart your shell:{RESET}");
+    println!("{DIM}       PowerShell:  . $PROFILE{RESET}");
+    println!("{DIM}       Zsh/Bash:    source ~/.zshrc{RESET}");
+    println!("{DIM}  2. Verify install:     truth --version{RESET}");
+    println!("{DIM}  3. Add agent rules:    truth init --agent claude{RESET}");
+    println!("{DIM}                         truth init --agent cursor{RESET}");
+    println!("{DIM}  4. Check everything:   truth doctor{RESET}");
+}
+
+fn print_doctor(checks: Vec<setup::DoctorCheck>) {
+    println!("{CYAN}{BOLD}Truth-Ctx Doctor{RESET}");
+    println!();
+
+    let col = 30usize;
+    let line = "─".repeat(col + 28);
+    println!("{DIM}{}{RESET}", line);
+    println!("{DIM}{:<col$}  {:<8}  {}{RESET}", "Check", "Status", "Detail");
+    println!("{DIM}{}{RESET}", line);
+
+    let mut ok = 0u32;
+    let mut fail = 0u32;
+
+    for c in &checks {
+        let (icon, color) = match c.status {
+            setup::DoctorStatus::Ok   => { ok   += 1; ("✓ ok",   GREEN) }
+            setup::DoctorStatus::Warn =>             { ("⚠ warn", YELLOW) }
+            setup::DoctorStatus::Fail => { fail += 1; ("✗ fail", RED)   }
+        };
+        println!(
+            "{:<col$}  {color}{:<8}{RESET}  {DIM}{}{RESET}",
+            c.name, icon, c.detail
+        );
     }
+
+    println!("{DIM}{}{RESET}", line);
+    if fail == 0 {
+        println!("  {GREEN}{BOLD}All checks passed ({ok} ok){RESET}");
+    } else {
+        println!("  {GREEN}{ok} ok{RESET}  {RED}{fail} failed{RESET}");
+        println!();
+        println!("{DIM}  Run `truth setup` to fix missing registrations.{RESET}");
+        println!("{DIM}  Run `truth init --agent <name>` to add agent instructions.{RESET}");
+    }
+    println!();
 }

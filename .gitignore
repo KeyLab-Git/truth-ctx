@@ -1,0 +1,27 @@
+# --- Rust Specific ---
+# The target directory is already there, but let's be specific
+target/
+# If you use cargo-expand or other tools
+*.rs.bk
+
+# --- Environment & Secrets (CRITICAL) ---
+# Never push your API keys!
+.env
+*.env
+.secret
+credentials.json
+
+# --- OS / IDE Specific ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# --- Truth-Ctx Specific ---
+# If your app creates a local state or log directory during testing
+state/
+logs/
+*.log
+
+.gemini/
+.claude/

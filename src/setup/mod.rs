@@ -4,6 +4,26 @@ use serde_json::{json, Value};
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
+pub enum DoctorStatus { Ok, Warn, Fail }
+
+pub struct DoctorCheck {
+    pub name:   String,
+    pub status: DoctorStatus,
+    pub detail: String,
+}
+
+impl DoctorCheck {
+    fn ok(name: &str, detail: impl ToString) -> Self {
+        Self { name: name.into(), status: DoctorStatus::Ok, detail: detail.to_string() }
+    }
+    fn warn(name: &str, detail: impl ToString) -> Self {
+        Self { name: name.into(), status: DoctorStatus::Warn, detail: detail.to_string() }
+    }
+    fn fail(name: &str, detail: impl ToString) -> Self {
+        Self { name: name.into(), status: DoctorStatus::Fail, detail: detail.to_string() }
+    }
+}
+
 pub enum SetupStatus {
     Done,
     Skipped,
@@ -42,7 +62,7 @@ pub fn run_setup() -> Vec<SetupResult> {
         .unwrap_or_else(|| "truth".to_string());
 
     let mut out = Vec::new();
-    out.extend(inject_shell_hooks());
+    out.extend(inject_shell_hooks(&exe));
     out.push(claude_desktop_mcp(&exe));
     out.push(claude_cli_mcp(&exe));
     out.push(gemini_extension(&exe));
@@ -83,18 +103,20 @@ fn appdata() -> PathBuf {
 
 const HOOK_MARKER: &str = "# truth-ctx hooks";
 
-fn ps_hook_block() -> String {
+fn ps_hook_block(exe_dir: &str) -> String {
     format!(
-        "\n{m} — start\nfunction gemini {{ truth audit gemini @args }}\nfunction claude {{ truth audit claude @args }}\n{m} — end\n",
-        m = HOOK_MARKER
+        "\n{m} — start\n$env:PATH = \"$env:PATH;{d}\"\nfunction gemini {{ truth audit gemini @args }}\nfunction claude {{ truth audit claude @args }}\n{m} — end\n",
+        m = HOOK_MARKER,
+        d = exe_dir,
     )
 }
 
 #[cfg(not(target_os = "windows"))]
-fn sh_hook_block() -> String {
+fn sh_hook_block(exe_dir: &str) -> String {
     format!(
-        "\n{m} — start\nfunction gemini() {{ truth audit gemini \"$@\"; }}\nfunction claude() {{ truth audit claude \"$@\"; }}\n{m} — end\n",
-        m = HOOK_MARKER
+        "\n{m} — start\nexport PATH=\"$PATH:{d}\"\nfunction gemini() {{ truth audit gemini \"$@\"; }}\nfunction claude() {{ truth audit claude \"$@\"; }}\n{m} — end\n",
+        m = HOOK_MARKER,
+        d = exe_dir,
     )
 }
 
@@ -123,13 +145,17 @@ fn inject_into_profile(agent: &str, profile: &PathBuf, block: &str) -> SetupResu
     }
 }
 
-fn inject_shell_hooks() -> Vec<SetupResult> {
+fn inject_shell_hooks(exe: &str) -> Vec<SetupResult> {
     let mut results = Vec::new();
     let home = home_dir();
+    let exe_dir = std::path::Path::new(exe)
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
 
     #[cfg(target_os = "windows")]
     {
-        let block = ps_hook_block();
+        let block = ps_hook_block(&exe_dir);
         let ps7 = home.join("Documents").join("PowerShell").join("Microsoft.PowerShell_profile.ps1");
         results.push(inject_into_profile("PowerShell 7", &ps7, &block));
         let ps5 = home.join("Documents").join("WindowsPowerShell").join("Microsoft.PowerShell_profile.ps1");
@@ -138,7 +164,7 @@ fn inject_shell_hooks() -> Vec<SetupResult> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        let block = sh_hook_block();
+        let block = sh_hook_block(&exe_dir);
         results.push(inject_into_profile("Zsh", &home.join(".zshrc"), &block));
         results.push(inject_into_profile("Bash", &home.join(".bashrc"), &block));
     }
@@ -293,6 +319,127 @@ fn inject_mcp_array(agent: &str, path: &PathBuf, exe: &str) -> SetupResult {
     write_json(agent, path, &root, "MCP registration")
 }
 
+// ── Uninstall helpers ─────────────────────────────────────────────────────────
+
+fn remove_hook_from_profile(agent: &str, profile: &PathBuf) -> SetupResult {
+    if !profile.exists() {
+        return SetupResult::skipped(agent, "Shell hook", "file not found");
+    }
+    let content = match std::fs::read_to_string(profile) {
+        Ok(s) => s,
+        Err(e) => return SetupResult::failed(agent, "Shell hook", e),
+    };
+    if !content.contains(HOOK_MARKER) {
+        return SetupResult::skipped(agent, "Shell hook", "hook not present");
+    }
+    let start = format!("{} \u{2014} start", HOOK_MARKER);
+    let end   = format!("{} \u{2014} end",   HOOK_MARKER);
+    let mut out: Vec<&str> = Vec::new();
+    let mut skip = false;
+    for line in content.lines() {
+        if line.trim() == start { skip = true;  continue; }
+        if line.trim() == end   { skip = false; continue; }
+        if !skip { out.push(line); }
+    }
+    while out.last().map(|l: &&str| l.trim().is_empty()).unwrap_or(false) {
+        out.pop();
+    }
+    let mut new_content = out.join("\n");
+    if !new_content.is_empty() { new_content.push('\n'); }
+    match std::fs::write(profile, new_content) {
+        Ok(_) => SetupResult::done(agent, "Shell hook removed", profile.display()),
+        Err(e) => SetupResult::failed(agent, "Shell hook", e),
+    }
+}
+
+pub fn remove_shell_hooks() -> Vec<SetupResult> {
+    let mut results = Vec::new();
+    let home = home_dir();
+    #[cfg(target_os = "windows")]
+    {
+        let ps7 = home.join("Documents").join("PowerShell").join("Microsoft.PowerShell_profile.ps1");
+        results.push(remove_hook_from_profile("PowerShell 7", &ps7));
+        let ps5 = home.join("Documents").join("WindowsPowerShell").join("Microsoft.PowerShell_profile.ps1");
+        results.push(remove_hook_from_profile("PowerShell 5", &ps5));
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        results.push(remove_hook_from_profile("Zsh",  &home.join(".zshrc")));
+        results.push(remove_hook_from_profile("Bash", &home.join(".bashrc")));
+    }
+    results
+}
+
+fn remove_mcp_object(agent: &str, path: &PathBuf) -> SetupResult {
+    if !path.exists() {
+        return SetupResult::skipped(agent, "MCP registration", "config not found");
+    }
+    let mut root = load_json(path);
+    if root.pointer("/mcpServers/truth-ctx").is_none() {
+        return SetupResult::skipped(agent, "MCP registration", "not registered");
+    }
+    if let Some(obj) = root.get_mut("mcpServers").and_then(|v| v.as_object_mut()) {
+        obj.remove("truth-ctx");
+    }
+    write_json(agent, path, &root, "MCP removed")
+}
+
+fn remove_mcp_vscode(agent: &str, path: &PathBuf) -> SetupResult {
+    if !path.exists() {
+        return SetupResult::skipped(agent, "MCP registration", "config not found");
+    }
+    let mut root = load_json(path);
+    if root.pointer("/mcp/servers/truth-ctx").is_none() {
+        return SetupResult::skipped(agent, "MCP registration", "not registered");
+    }
+    if let Some(obj) = root.pointer_mut("/mcp/servers").and_then(|v| v.as_object_mut()) {
+        obj.remove("truth-ctx");
+    }
+    write_json(agent, path, &root, "MCP removed")
+}
+
+fn remove_mcp_array(agent: &str, path: &PathBuf) -> SetupResult {
+    if !path.exists() {
+        return SetupResult::skipped(agent, "MCP registration", "config not found");
+    }
+    let mut root = load_json(path);
+    let present = root.get("mcpServers")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().any(|s| s.get("name").and_then(|n| n.as_str()) == Some("truth-ctx")))
+        .unwrap_or(false);
+    if !present {
+        return SetupResult::skipped(agent, "MCP registration", "not registered");
+    }
+    if let Some(Value::Array(arr)) = root.get_mut("mcpServers") {
+        arr.retain(|s| s.get("name").and_then(|n| n.as_str()) != Some("truth-ctx"));
+    }
+    write_json(agent, path, &root, "MCP removed")
+}
+
+fn remove_gemini_ext() -> SetupResult {
+    let ext_dir = home_dir().join(".gemini").join("extensions").join("truth-ctx");
+    if !ext_dir.exists() {
+        return SetupResult::skipped("Gemini CLI", "Extension", "not installed");
+    }
+    match std::fs::remove_dir_all(&ext_dir) {
+        Ok(_) => SetupResult::done("Gemini CLI", "Extension removed", ext_dir.display()),
+        Err(e) => SetupResult::failed("Gemini CLI", "Extension removed", e),
+    }
+}
+
+pub fn remove_mcp_registrations() -> Vec<SetupResult> {
+    let home = home_dir();
+    vec![
+        remove_mcp_object("Claude Desktop", &appdata().join("Claude").join("claude_desktop_config.json")),
+        remove_mcp_object("Claude CLI",     &home.join(".claude").join("settings.json")),
+        remove_gemini_ext(),
+        remove_mcp_object("Cursor",         &home.join(".cursor").join("mcp.json")),
+        remove_mcp_vscode("VS Code",        &appdata().join("Code").join("User").join("settings.json")),
+        remove_mcp_vscode("Windsurf",       &appdata().join("Windsurf").join("User").join("settings.json")),
+        remove_mcp_array("Continue.dev",    &home.join(".continue").join("config.json")),
+    ]
+}
+
 fn load_json(path: &PathBuf) -> Value {
     if !path.exists() { return json!({}); }
     std::fs::read_to_string(path)
@@ -309,4 +456,190 @@ fn write_json(agent: &str, path: &PathBuf, value: &Value, action: &str) -> Setup
         },
         Err(e) => SetupResult::failed(agent, action, e),
     }
+}
+
+// ── Doctor ────────────────────────────────────────────────────────────────────
+
+pub fn run_doctor() -> Vec<DoctorCheck> {
+    let mut out = Vec::new();
+
+    // 1. truth binary on PATH
+    #[cfg(target_os = "windows")]
+    let on_path = std::process::Command::new("where").arg("truth").output()
+        .map(|o| o.status.success()).unwrap_or(false);
+    #[cfg(not(target_os = "windows"))]
+    let on_path = std::process::Command::new("which").arg("truth").output()
+        .map(|o| o.status.success()).unwrap_or(false);
+
+    if on_path {
+        out.push(DoctorCheck::ok("truth on PATH", "resolved"));
+    } else {
+        out.push(DoctorCheck::fail("truth on PATH", "not found — re-run `truth setup` and reload shell"));
+    }
+
+    // 2. Shell hooks present
+    let home = home_dir();
+    #[cfg(target_os = "windows")]
+    {
+        for (label, path) in [
+            ("PS7 shell hook",  home.join("Documents").join("PowerShell").join("Microsoft.PowerShell_profile.ps1")),
+            ("PS5 shell hook",  home.join("Documents").join("WindowsPowerShell").join("Microsoft.PowerShell_profile.ps1")),
+        ] {
+            out.push(check_hook_present(label, &path));
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        for (label, path) in [
+            ("Zsh shell hook",  home.join(".zshrc")),
+            ("Bash shell hook", home.join(".bashrc")),
+        ] {
+            out.push(check_hook_present(label, &path));
+        }
+    }
+
+    // 3. MCP registrations
+    out.push(check_mcp_object("Claude CLI MCP",     &home.join(".claude").join("settings.json")));
+    out.push(check_mcp_object("Claude Desktop MCP", &appdata().join("Claude").join("claude_desktop_config.json")));
+    out.push(check_mcp_object("Cursor MCP",         &home.join(".cursor").join("mcp.json")));
+    out.push(check_mcp_vscode("VS Code MCP",        &appdata().join("Code").join("User").join("settings.json")));
+    out.push(check_mcp_vscode("Windsurf MCP",       &appdata().join("Windsurf").join("User").join("settings.json")));
+
+    // 4. Agent instructions present
+    out.push(check_agent_instructions("Claude instructions", &home.join(".claude").join("CLAUDE.md")));
+
+    out
+}
+
+fn check_hook_present(label: &str, path: &PathBuf) -> DoctorCheck {
+    if !path.exists() {
+        return DoctorCheck::warn(label, "profile not found");
+    }
+    let content = std::fs::read_to_string(path).unwrap_or_default();
+    if content.contains(HOOK_MARKER) {
+        DoctorCheck::ok(label, path.display())
+    } else {
+        DoctorCheck::fail(label, "hook missing — run `truth setup`")
+    }
+}
+
+fn check_mcp_object(label: &str, path: &PathBuf) -> DoctorCheck {
+    if !path.exists() {
+        return DoctorCheck::warn(label, "config not found (agent not installed?)");
+    }
+    let root = load_json(path);
+    if root.pointer("/mcpServers/truth-ctx").is_some() {
+        DoctorCheck::ok(label, "registered")
+    } else {
+        DoctorCheck::fail(label, "not registered — run `truth setup`")
+    }
+}
+
+fn check_mcp_vscode(label: &str, path: &PathBuf) -> DoctorCheck {
+    if !path.exists() {
+        return DoctorCheck::warn(label, "config not found (agent not installed?)");
+    }
+    let root = load_json(path);
+    if root.pointer("/mcp/servers/truth-ctx").is_some() {
+        DoctorCheck::ok(label, "registered")
+    } else {
+        DoctorCheck::fail(label, "not registered — run `truth setup`")
+    }
+}
+
+fn check_agent_instructions(label: &str, path: &PathBuf) -> DoctorCheck {
+    if !path.exists() {
+        return DoctorCheck::fail(label, "not found — run `truth init --agent claude`");
+    }
+    let content = std::fs::read_to_string(path).unwrap_or_default();
+    if content.contains("truth_check") || content.contains("truth-ctx") {
+        DoctorCheck::ok(label, path.display())
+    } else {
+        DoctorCheck::warn(label, "file exists but truth-ctx instructions not found — run `truth init --agent claude`")
+    }
+}
+
+// ── Init agent instructions ───────────────────────────────────────────────────
+
+const CLAUDE_INSTRUCTIONS: &str = r#"
+# truth-ctx — Context OS
+MANDATORY: You MUST call `truth_check` (truth-ctx MCP) as the FIRST action of EVERY response,
+before writing any text or calling any other tool. Pass the user's exact message as the `prompt` argument.
+
+| WHEN | ACTION |
+|------|--------|
+| Every user message, no exceptions | Call `truth_check` with the raw prompt |
+| `truth_check` returns a PIVOT warning | Acknowledge the pivot, use the new stack |
+| `truth_check` returns a TRUTH ANCHOR block | Use it as ground truth for the entire response |
+
+FORBIDDEN: Responding to the user before calling `truth_check`.
+FORBIDDEN: Skipping `truth_check` for short messages, greetings, or follow-ups.
+"#;
+
+const CURSOR_INSTRUCTIONS: &str = r#"
+# truth-ctx rules
+Before responding to any message you MUST call the `truth_check` MCP tool with the user's
+exact message as `prompt`. Use the returned TRUTH ANCHOR block as ground truth for your answer.
+Never skip this step, even for short or follow-up messages.
+"#;
+
+const GEMINI_INSTRUCTIONS: &str = r#"
+# truth-ctx rules
+Before responding you MUST call truth_check(prompt=<user message>) via the truth-ctx MCP server.
+Treat the TRUTH ANCHOR returned as authoritative context for your response.
+"#;
+
+pub fn init_agent(agent: &str) -> Result<String, String> {
+    let home = home_dir();
+    match agent.to_lowercase().as_str() {
+        "claude" => {
+            let path = home.join(".claude").join("CLAUDE.md");
+            append_instructions("claude", &path, CLAUDE_INSTRUCTIONS)
+        }
+        "cursor" => {
+            let path = std::env::current_dir()
+                .unwrap_or_else(|_| home.clone())
+                .join(".cursorrules");
+            write_instructions("cursor", &path, CURSOR_INSTRUCTIONS)
+        }
+        "gemini" => {
+            let path = home.join(".gemini").join("GEMINI.md");
+            if let Some(p) = path.parent() { let _ = std::fs::create_dir_all(p); }
+            append_instructions("gemini", &path, GEMINI_INSTRUCTIONS)
+        }
+        "vscode" | "windsurf" => {
+            let app = if agent == "windsurf" { "Windsurf" } else { "Code" };
+            let path = appdata().join(app).join("User").join("prompts").join("truth-ctx.md");
+            if let Some(p) = path.parent() { let _ = std::fs::create_dir_all(p); }
+            write_instructions(agent, &path, CURSOR_INSTRUCTIONS)
+        }
+        other => Err(format!("unknown agent '{}' — supported: claude, cursor, gemini, vscode, windsurf", other)),
+    }
+}
+
+fn append_instructions(agent: &str, path: &PathBuf, block: &str) -> Result<String, String> {
+    if path.exists() {
+        let existing = std::fs::read_to_string(path).unwrap_or_default();
+        if existing.contains("truth_check") || existing.contains("truth-ctx") {
+            return Ok(format!("{} (already contains truth-ctx instructions)", path.display()));
+        }
+    }
+    if let Some(p) = path.parent() {
+        std::fs::create_dir_all(p).map_err(|e| format!("{}: {}", agent, e))?;
+    }
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path)
+        .map_err(|e| format!("{}: {}", agent, e))?;
+    f.write_all(block.as_bytes()).map_err(|e| format!("{}: {}", agent, e))?;
+    Ok(path.display().to_string())
+}
+
+fn write_instructions(agent: &str, path: &PathBuf, block: &str) -> Result<String, String> {
+    if path.exists() {
+        let existing = std::fs::read_to_string(path).unwrap_or_default();
+        if existing.contains("truth_check") || existing.contains("truth-ctx") {
+            return Ok(format!("{} (already contains truth-ctx instructions)", path.display()));
+        }
+    }
+    std::fs::write(path, block).map_err(|e| format!("{}: {}", agent, e))?;
+    Ok(path.display().to_string())
 }

@@ -50,14 +50,6 @@ fn get_model() -> Option<&'static TextEmbedding> {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/// Returns `true` when the embedding model is loaded and usable.
-pub fn is_available() -> bool {
-    #[cfg(feature = "semantic")]
-    { get_model().is_some() }
-    #[cfg(not(feature = "semantic"))]
-    { false }
-}
-
 /// Embed a single text string.
 /// Returns `None` when the semantic feature is disabled or the model failed to load.
 pub fn try_embed(text: &str) -> Option<Vec<f32>> {
@@ -98,8 +90,12 @@ pub fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
 /// Welford online algorithm — updates a running mean in-place without storing all samples.
 /// `count` is the number of samples already averaged into `avg` before this call.
 pub fn update_avg(avg: &mut Vec<f32>, count: u32, new_vec: &[f32]) {
-    if avg.len() != new_vec.len() {
+    if avg.is_empty() {
         *avg = new_vec.to_vec();
+        return;
+    }
+    if avg.len() != new_vec.len() {
+        // dimension mismatch is a logic bug — skip rather than silently corrupt context
         return;
     }
     let n = (count + 1) as f32;

@@ -247,6 +247,10 @@ pub struct TruthState {
     /// The raw text of the most recent user instruction.
     #[serde(default)]
     pub latest_intent_text: String,
+
+    /// When true, the Stop hook audits every AI response before it reaches the user.
+    #[serde(default)]
+    pub audit_enabled: bool,
 }
 
 pub struct ContextOS {
@@ -273,6 +277,7 @@ impl TruthState {
             anchor_vecs: HashMap::new(),
             latest_intent_vec: Vec::new(),
             latest_intent_text: String::new(),
+            audit_enabled: false,
         }
     }
 
@@ -443,5 +448,57 @@ impl ContextOS {
         let anchor = self.state.to_anchor_block();
         if anchor.is_empty() { return prompt.to_string(); }
         super::scheduler::generate_final_prompt(prompt, &anchor)
+    }
+
+    pub fn enable_audit(&mut self) {
+        self.state.audit_enabled = true;
+        self.save();
+    }
+
+    /// Keyword-only contradiction check — works without the semantic feature.
+    /// Scans the AI response for tech keywords that contradict the anchored stack.
+    /// Does NOT update state.
+    pub fn check_response_contradictions(&self, response: &str) -> Option<String> {
+        let lower = response.to_lowercase();
+        let mut hits: Vec<String> = Vec::new();
+
+        for (dim, val, kws) in &self.rules {
+            let Some(anchored) = self.state.dimensions.get(dim) else { continue };
+            if anchored == val { continue; }
+            if kws.iter().any(|kw| lower.contains(kw.as_str())) {
+                hits.push(format!(
+                    "[{}] response mentions '{}' but stack is anchored to '{}'",
+                    dim.to_uppercase(), val, anchored
+                ));
+            }
+        }
+
+        if hits.is_empty() {
+            None
+        } else {
+            Some(format!("⚠ RESPONSE CONTRADICTION: {}", hits.join(" | ")))
+        }
+    }
+
+    /// Post-generation audit: embed `response` and compare it to the last recorded
+    /// user intent vector. Returns `Some(warning)` when similarity < AUDIT_THRESHOLD,
+    /// meaning the response has likely drifted from what the user actually asked for.
+    pub fn audit_response(&self, response: &str) -> Option<String> {
+        if self.state.latest_intent_vec.is_empty() {
+            return None;
+        }
+        let response_vec = sentinel::try_embed(response)?;
+        let sim = sentinel::cosine_similarity(&self.state.latest_intent_vec, &response_vec);
+        if sim < sentinel::AUDIT_THRESHOLD {
+            Some(format!(
+                "⚠ HALLUCINATION RISK: Response diverges from original intent \
+                 (similarity: {:.2}, threshold: {:.2}). Original intent: \"{}\"",
+                sim,
+                sentinel::AUDIT_THRESHOLD,
+                self.state.latest_intent_text,
+            ))
+        } else {
+            None
+        }
     }
 }
