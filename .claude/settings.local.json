@@ -10,10 +10,15 @@
       "PowerShell(Stop-Process *)",
       "Skill(update-config)",
       "mcp__lean-ctx__ctx_multi_read",
-      "Bash(D:/jp/Projects/truth-ctx/target/release/truth-ctx.exe *)",
       "Bash(cargo build *)",
       "mcp__truth-ctx__truth_check",
-      "Bash(cargo run *)"
+      "Bash(cargo run *)",
+      "PowerShell(Get-Process *)",
+      "Bash(Remove-Item *)",
+      "Bash(cargo check *)",
+      "Read(//c/Users/jepeh/.local/bin/**)",
+      "Bash(python -c \"import sys,json; [print\\(json.loads\\(l\\).get\\('message',{}\\).get\\('rendered',''\\)\\) for l in sys.stdin if '\\\\\"level\\\\\":\\\\\"error\\\\\"' in l]\")",
+      "Bash(Test-Path *)"
     ]
   }
 }
